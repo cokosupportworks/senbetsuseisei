@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>漫画シナリオ選別＆生成機</title>
+    <!-- アプリアイコンの設定 -->
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+    <link rel="icon" href="apple-touch-icon.png">
+
+
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    body { font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif; background-color: #f3f4f6; color: #1f2937; }
+    .hide-scrollbar::-webkit-scrollbar { display: none; }
+    .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    .loader { border: 4px solid #f3f3f3; border-top: 4px solid #3b82f6; border-radius: 50%; width: 24px; height: 24px; animation: spin 1s linear infinite; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    
+    /* Toggle Switch Styles */
+    .toggle-checkbox:checked { right: 0; border-color: #3b82f6; }
+    .toggle-checkbox:checked + .toggle-label { background-color: #3b82f6; }
+    .toggle-checkbox:checked + .toggle-label:after { transform: translateX(100%); border-color: white; }
+    .toggle-label { width: 4rem; height: 2rem; background-color: #e5e7eb; border-radius: 9999px; position: relative; cursor: pointer; transition: background-color 0.3s; }
+    .toggle-label:after { content: ''; position: absolute; top: 0.125rem; left: 0.125rem; width: 1.75rem; height: 1.75rem; background-color: white; border-radius: 50%; transition: transform 0.3s; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    // ==========================================
+    // アプリ設定・定数
+    // ==========================================
+    const AI_MODELS = [
+      'gemini-2.5-flash-preview-09-2025',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+      'gemini-1.5-pro'
+    ];
+    
+    const CATEGORIES = ["健康の保持", "心理的な安定", "人間関係の形成", "環境の把握", "身体の動き", "コミュニケーション"];
+    
+    const CATEGORY_MAP = {
+      "健康の保持": "1．健康の保持",
+      "心理的な安定": "2．心理的な安定",
+      "人間関係の形成": "3．人間関係の形成",
+      "環境の把握": "4．環境の把握",
+      "身体の動き": "5．身体の動き",
+      "コミュニケーション": "6．コミュニケーション"
+    };
+
+    const REVERSE_CATEGORY_MAP = Object.fromEntries(Object.entries(CATEGORY_MAP).map(([k, v]) => [v, k]));
+
+    // ==========================================
+    // アイコンコンポーネント
+    // ==========================================
+    const Icon = ({ name, size = 24, className = "" }) => {
+      const svgRef = React.useRef(null);
+      React.useEffect(() => {
+        if (svgRef.current && window.lucide && window.lucide.icons[name]) {
+          svgRef.current.innerHTML = '';
+          const iconNode = window.lucide.icons[name];
+          const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+          Object.entries(iconNode.attrs).forEach(([k, v]) => svg.setAttribute(k, v));
+          svg.setAttribute('width', size);
+          svg.setAttribute('height', size);
+          svg.setAttribute('class', className);
+          svg.innerHTML = iconNode.children.map(child => {
+            const el = document.createElementNS('http://www.w3.org/2000/svg', child[0]);
+            Object.entries(child[1]).forEach(([k, v]) => el.setAttribute(k, v));
+            return el.outerHTML;
+          }).join('');
+          svgRef.current.appendChild(svg);
+        }
+      }, [name, size, className]);
+      return <span ref={svgRef} style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }} />;
+    };
+
+    // ==========================================
+    // メインアプリケーション
+    // ==========================================
+    const App = () => {
+      // --- State ---
+      const [cases, setCases] = React.useState([]);
+      const [favorites, setFavorites] = React.useState([]);
+      const [generatedScenarios, setGeneratedScenarios] = React.useState({});
+      const [apiKey, setApiKey] = React.useState('');
+      const [selectedModel, setSelectedModel] = React.useState(AI_MODELS[0]);
+      
+      const [activeTab, setActiveTab] = React.useState(CATEGORIES[0]);
+      const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+      const [isFormOpen, setIsFormOpen] = React.useState(false);
+      const [editingCaseId, setEditingCaseId] = React.useState(null);
+      const [isGeneratingBatch, setIsGeneratingBatch] = React.useState(false);
+      const [batchProgress, setBatchProgress] = React.useState({ current: 0, total: 0 });
+      const [notification, setNotification] = React.useState(null);
+      const [isInitialized, setIsInitialized] = React.useState(false);
+
+      // --- オートセーブ (localStorage) ---
+      React.useEffect(() => {
+        const savedData = localStorage.getItem('scenarioMakerState');
+        if (savedData) {
+          try {
+            const parsed = JSON.parse(savedData);
+            if (parsed.cases) setCases(parsed.cases);
+            if (parsed.favorites) setFavorites(parsed.favorites);
+            if (parsed.generatedScenarios) setGeneratedScenarios(parsed.generatedScenarios);
+            if (parsed.apiKey) setApiKey(parsed.apiKey);
+            if (parsed.selectedModel) setSelectedModel(parsed.selectedModel);
+          } catch (e) {
+            console.error("Failed to parse saved data");
+          }
+        }
+        setIsInitialized(true);
+      }, []);
+
+      React.useEffect(() => {
+        if (isInitialized) {
+          const stateToSave = { cases, favorites, generatedScenarios, apiKey, selectedModel };
+          localStorage.setItem('scenarioMakerState', JSON.stringify(stateToSave));
+        }
+      }, [cases, favorites, generatedScenarios, apiKey, selectedModel, isInitialized]);
+
+      const showNotification = (message, type = 'success') => {
+        setNotification({ message, type });
+        setTimeout(() => setNotification(null), 3000);
+      };
+
+      const resetData = () => {
+        if (window.confirm("すべてのデータを破棄して最初からやり直しますか？\n（API設定は保持されます）")) {
+          setCases([]);
+          setFavorites([]);
+          setGeneratedScenarios({});
+          setActiveTab(CATEGORIES[0]);
+        }
+      };
+
+      // --- 作業データのバックアップ保存 ---
+      const handleBackupSave = () => {
+        const backupData = {
+          isWorkspaceBackup: true,
+          cases,
+          favorites,
+          generatedScenarios,
+          version: "1.0",
+          savedAt: new Date().toISOString()
+        };
+        const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `scenario_maker_backup_${new Date().getTime()}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showNotification("作業データをバックアップ保存しました");
+      };
+
+      // --- ファイル読み込み ---
+      const handleFileUpload = (event) => {
+        const fileInput = event.target;
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const content = e.target.result;
+          
+          if (file.name.endsWith('.json')) {
+            try {
+              const parsedJson = JSON.parse(content);
+
+              // 1. 作業バックアップデータの復元か判定
+              if (parsedJson.isWorkspaceBackup) {
+                if (window.confirm("バックアップデータを読み込みます。現在の作業状態は上書きされますがよろしいですか？")) {
+                  setCases(parsedJson.cases || []);
+                  setFavorites(parsedJson.favorites || []);
+                  setGeneratedScenarios(parsedJson.generatedScenarios || {});
+                  showNotification("作業データを復元しました");
+                }
+                fileInput.value = ''; // 連続で同じファイルを読めるようにリセット
+                return;
+              }
+
+              // 2. scenarios.jsonのインポートか判定
+              if (parsedJson.scenarios) {
+                const importedScenarios = {};
+                const importedCases = [];
+                const importedFavs = [];
+
+                Object.entries(parsedJson.scenarios).forEach(([catKey, scnList]) => {
+                  const category = REVERSE_CATEGORY_MAP[catKey] || catKey;
+                  scnList.forEach(scn => {
+                    const id = scn.id || `custom_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                    importedScenarios[id] = scn;
+                    // caseデータが存在しない場合のためのダミーケース作成
+                    if (!cases.some(c => c.id === id)) {
+                       importedCases.push({
+                          id, category, tag: "インポート事例", text: scn.scenario || "説明なし", keywords: []
+                       });
+                    }
+                    importedFavs.push(id);
+                  });
+                });
+
+                setGeneratedScenarios(prev => ({ ...prev, ...importedScenarios }));
+                setCases(prev => [...prev, ...importedCases]);
+                setFavorites(prev => [...new Set([...prev, ...importedFavs])]);
+                showNotification("scenarios.json を読み込みました");
+                fileInput.value = '';
+                return;
+              }
+            } catch (err) {
+              alert("JSONファイルの解析に失敗しました。");
+              fileInput.value = '';
+              return;
+            }
+          }
+
+          // CASES_DATA (テキスト/JS) のパース
+          try {
+            // 文字列から配列部分を抽出する試み
+            const startIndex = content.indexOf('[');
+            const endIndex = content.lastIndexOf(']');
+            let parsedCases = [];
+            
+            if (startIndex !== -1 && endIndex !== -1) {
+              const jsonStr = content.substring(startIndex, endIndex + 1).replace(/,\s*\]/g, ']');
+              parsedCases = JSON.parse(jsonStr);
+            } else {
+              parsedCases = JSON.parse(content);
+            }
+
+            if (Array.isArray(parsedCases) && parsedCases.length > 0) {
+              setCases(prev => {
+                  const newCases = parsedCases.filter(nc => !prev.some(pc => pc.id === nc.id));
+                  return [...prev, ...newCases];
+              });
+              showNotification("事例データを読み込みました");
+            } else {
+              alert("有効な事例データが見つかりませんでした。");
+            }
+          } catch (err) {
+            alert("ファイルの解析に失敗しました。正しいフォーマットか確認してください。\n" + err.message);
+          }
+          fileInput.value = '';
+        };
+        reader.readAsText(file);
+      };
+
+      // --- AI生成処理 ---
+      const generateScenario = async (caseData) => {
+        // Canvas（プレビュー）環境かどうかを判定
+        const isCanvasPreview = window.location.hostname.includes('googleusercontent.com') || window.location.hostname === '';
+
+        // Canvas環境以外でAPIキーがない場合はエラーにしてストップ
+        if (!apiKey && !isCanvasPreview) {
+          alert("設定画面からAPIキーを入力してください。");
+          setIsSettingsOpen(true);
+          return null;
+        }
+
+        const prompt = `以下の特別支援教育の事例を基に、4コマ漫画のシナリオデータをJSONフォーマットで作成してください。
+必ず「手本(Tehon)」と「発問(Hatsumon)」の2パターンのシナリオを同時に作成してください。
+
+【対象事例】
+・分類: ${caseData.category}
+・タグ: ${caseData.tag}
+・事例: ${caseData.text}
+・キーワード: ${(caseData.keywords || []).join(', ')}
+
+【厳守するルール】
+1. 出力は必ず指定されたJSON構造のみとすること（マークダウン記法 \`\`\`json などは含めず、純粋なJSON文字列だけを出力）。
+2. 「scenario」と「goal」および「dialogue」のテキスト内では、すべての漢字の直後に半角カッコとひらがなでルビを振ること。例: 学校(がっこう)に行(い)く。
+3. 【手本（panelsTehon）の構成】
+   1コマ目: 問題となる場面の発生
+   2コマ目: その結果どうなるか、周りの反応など
+   3コマ目: 解決策（ポイント）に気づく、または実践する
+   4コマ目: うまくできた結果（笑顔など）
+4. 【発問（panelsHatsumon）の構成】
+   1コマ目: 問題となる場面の発生
+   2コマ目: その結果どうなるか、周りの反応など
+   3コマ目: 周りからの働きかけや解決のポイント提示
+   4コマ目: 解決できない状態や、本人がポイントを受け入れない様子、困っている場面で終わる
+
+【出力JSONフォーマット】
+{
+  "label": "短いラベル名（例: 手洗いを嫌がる）",
+  "title": "プリントのタイトル（例: 清潔(せいけつ)な 生活(せいかつ)）",
+  "scenario": "場面の説明文。漢字にはルビを振る。",
+  "goal": "指導のねらい。漢字にはルビを振る。",
+  "hasTehon": true,
+  "hasHatsumon": true,
+  "panelsTehon": [
+    { "scene": "情景説明（ルビ不要）", "dialogue": "セリフ（漢字にルビを振る）" },
+    { "scene": "情景説明", "dialogue": "セリフ" },
+    { "scene": "情景説明", "dialogue": "セリフ" },
+    { "scene": "情景説明", "dialogue": "セリフ" }
+  ],
+  "panelsHatsumon": [
+    { "scene": "情景説明", "dialogue": "セリフ" },
+    { "scene": "情景説明", "dialogue": "セリフ" },
+    { "scene": "情景説明", "dialogue": "セリフ" },
+    { "scene": "情景説明", "dialogue": "セリフ" }
+  ]
+}`;
+
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${apiKey}`;
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { responseMimeType: "application/json" }
+            })
+          });
+
+          if (!response.ok) throw new Error(`API Error: ${response.status}`);
+          const data = await response.json();
+          let text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (!text) throw new Error("No text returned from API");
+          
+          text = text.replace(/```json\n?|\n?```/g, '').trim();
+          const parsedData = JSON.parse(text);
+          parsedData.id = caseData.id; // IDを付与
+
+          setGeneratedScenarios(prev => ({ ...prev, [caseData.id]: parsedData }));
+          return parsedData;
+        } catch (err) {
+          console.error(err);
+          alert(`生成エラー: ${err.message}`);
+          return null;
+        }
+      };
+
+      const handleBatchGenerate = async () => {
+        const targets = favorites.filter(id => !generatedScenarios[id]);
+        if (targets.length === 0) {
+          showNotification("未生成のお気に入り事例がありません", "info");
+          return;
+        }
+
+        if (!window.confirm(`${targets.length}件のシナリオを連続生成します。よろしいですか？\n（API制限を避けるため時間がかかります）`)) return;
+
+        setIsGeneratingBatch(true);
+        setBatchProgress({ current: 0, total: targets.length });
+
+        for (let i = 0; i < targets.length; i++) {
+          const targetCase = cases.find(c => c.id === targets[i]);
+          if (targetCase) {
+            setBatchProgress({ current: i + 1, total: targets.length });
+            await generateScenario(targetCase);
+            // レートリミット回避のためのウェイト (3秒)
+            if (i < targets.length - 1) await new Promise(r => setTimeout(r, 3000));
+          }
+        }
+
+        setIsGeneratingBatch(false);
+        showNotification("一括生成が完了しました！");
+      };
+
+      // --- エクスポート処理 ---
+      const handleExport = () => {
+        const exportData = {
+          lastUpdated: new Date().toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' }),
+          version: "1.0",
+          scenarios: {
+            "1．健康の保持": [],
+            "2．心理的な安定": [],
+            "3．人間関係の形成": [],
+            "4．環境の把握": [],
+            "5．身体の動き": [],
+            "6．コミュニケーション": []
+          }
+        };
+
+        // お気に入りに登録されている順（あるいは生成済み全て）
+        Object.values(generatedScenarios).forEach(scn => {
+          const originalCase = cases.find(c => c.id === scn.id);
+          const catName = originalCase ? originalCase.category : CATEGORIES[0];
+          const exportKey = CATEGORY_MAP[catName] || CATEGORY_MAP["健康の保持"];
+          
+          // クリーンナップして追加
+          const cleanScn = { ...scn };
+          delete cleanScn.id;
+          exportData.scenarios[exportKey].push(cleanScn);
+        });
+
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'scenarios.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showNotification("scenarios.json をダウンロードしました");
+      };
+
+      // --- 手動編集/作成関連 ---
+      const openCreateForm = () => {
+        setEditingCaseId(null); // 新規
+        setIsFormOpen(true);
+      };
+
+      const openEditForm = (id) => {
+        setEditingCaseId(id);
+        setIsFormOpen(true);
+      };
+
+      const saveFormData = (formData) => {
+        let id = editingCaseId;
+        if (!id) {
+          // 新規作成
+          id = `custom_${Date.now()}`;
+          const newCase = {
+            id,
+            category: activeTab !== "生成済み一覧" ? activeTab : CATEGORIES[0],
+            tag: "手動作成",
+            text: formData.scenario,
+            keywords: []
+          };
+          setCases(prev => [...prev, newCase]);
+          setFavorites(prev => [...prev, id]);
+        }
+        
+        const newScenario = { ...formData, id };
+        setGeneratedScenarios(prev => ({ ...prev, [id]: newScenario }));
+        setIsFormOpen(false);
+        showNotification("シナリオデータを保存しました");
+      };
+
+      // --- UI 計算 ---
+      const currentCategoryCases = activeTab === "生成済み一覧" ? [] : cases.filter(c => c.category === activeTab);
+      const currentCategoryFavs = currentCategoryCases.filter(c => favorites.includes(c.id)).length;
+      const totalFavs = favorites.length;
+
+      if (!isInitialized) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          {/* Header */}
+          <header className="bg-white shadow-sm sticky top-0 z-40">
+            <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="bg-blue-600 p-2 rounded-lg text-white">
+                  <Icon name="book-open" size={20} />
+                </div>
+                <h1 className="font-bold text-xl text-gray-800 hidden sm:block">漫画シナリオ選別＆生成機</h1>
+              </div>
+              <div className="flex items-center gap-2 sm:gap-4">
+                <div className="text-sm font-medium text-gray-600 bg-gray-100 px-3 py-1.5 rounded-full flex items-center gap-2">
+                  <Icon name="star" size={16} className="text-yellow-500 fill-current" />
+                  <span>総合お気に入り: {totalFavs}件</span>
+                </div>
+                
+                {/* 読込・保存ボタンを分かりやすく強調 */}
+                <label className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors cursor-pointer shadow-sm" title="ファイルから読み込み (事例データやバックアップ)">
+                  <Icon name="folder-up" size={16} />
+                  <span className="hidden sm:inline">データ読込</span>
+                  <input type="file" className="hidden" accept=".txt,.js,.json" onChange={handleFileUpload} />
+                </label>
+                
+                <button onClick={handleBackupSave} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors shadow-sm" title="現在の作業状態をまるごと保存">
+                  <Icon name="save" size={16} />
+                  <span className="hidden sm:inline">作業保存</span>
+                </button>
+                
+                <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-colors" title="設定">
+                  <Icon name="settings" size={20} />
+                </button>
+                <button onClick={resetData} className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors" title="新しく作成する">
+                  <Icon name="trash-2" size={20} />
+                </button>
+                <button onClick={handleExport} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors shadow-sm">
+                  <Icon name="download" size={16} />
+                  <span className="hidden sm:inline">JSON書出し</span>
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {/* Main Content */}
+          <main className="flex-1 max-w-7xl w-full mx-auto p-4 flex flex-col gap-6">
+            
+            {cases.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-2xl border-2 border-dashed border-gray-300 p-12 text-center">
+                <div className="bg-blue-50 p-4 rounded-full text-blue-500 mb-4">
+                  <Icon name="upload-cloud" size={48} />
+                </div>
+                <h2 className="text-2xl font-bold text-gray-700 mb-2">データを読み込んで開始</h2>
+                <p className="text-gray-500 mb-8 max-w-md">
+                  提供された「事例データ（cases_data.txt）」または、保存した「scenarios.json」や<strong className="text-indigo-600">作業保存ファイル</strong>を選択して読み込んでください。
+                </p>
+                <label className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-xl font-medium cursor-pointer shadow-md transition-all flex items-center gap-2">
+                  <Icon name="file-plus" size={20} />
+                  ファイルを選択
+                  <input type="file" className="hidden" accept=".txt,.js,.json" onChange={handleFileUpload} />
+                </label>
+              </div>
+            ) : (
+              <>
+                {/* Tabs */}
+                <div className="bg-white p-2 rounded-xl shadow-sm overflow-x-auto hide-scrollbar flex gap-2">
+                  {CATEGORIES.map(cat => (
+                    <button
+                      key={cat}
+                      onClick={() => setActiveTab(cat)}
+                      className={`whitespace-nowrap px-4 py-2.5 rounded-lg text-sm font-medium transition-colors ${activeTab === cat ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                  <div className="w-px bg-gray-300 my-1 mx-1"></div>
+                  <button
+                    onClick={() => setActiveTab("生成済み一覧")}
+                    className={`whitespace-nowrap px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors ${activeTab === "生成済み一覧" ? 'bg-indigo-100 text-indigo-700' : 'text-gray-600 hover:bg-gray-100'}`}
+                  >
+                    <Icon name="check-circle-2" size={16} />
+                    生成済み一覧 ({Object.keys(generatedScenarios).length})
+                  </button>
+                </div>
+
+                {/* Toolbar */}
+                <div className="flex items-center justify-between">
+                  {activeTab !== "生成済み一覧" ? (
+                    <div className="flex items-center gap-4">
+                      <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                        {activeTab}
+                        <span className="text-sm font-normal text-gray-500 bg-gray-200 px-2 py-0.5 rounded-md">
+                          候補: {currentCategoryFavs} / {currentCategoryCases.length}
+                        </span>
+                      </h2>
+                      <button
+                        onClick={handleBatchGenerate}
+                        disabled={isGeneratingBatch || favorites.filter(id => !generatedScenarios[id]).length === 0}
+                        className="bg-purple-600 hover:bg-purple-700 disabled:bg-gray-400 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors shadow-sm"
+                      >
+                        {isGeneratingBatch ? <div className="loader w-4 h-4 border-2"></div> : <Icon name="wand-2" size={16} />}
+                        {isGeneratingBatch ? `一括生成中 (${batchProgress.current}/${batchProgress.total})` : "お気に入りを一括変換"}
+                      </button>
+                    </div>
+                  ) : (
+                    <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                      <Icon name="check-circle-2" size={24} className="text-indigo-600" />
+                      生成済み一覧
+                    </h2>
+                  )}
+                  
+                  <button onClick={openCreateForm} className="bg-blue-50 text-blue-600 hover:bg-blue-100 border border-blue-200 px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors">
+                    <Icon name="plus" size={16} />
+                    新規シナリオ作成
+                  </button>
+                </div>
+
+                {/* List */}
+                <div className="flex flex-col gap-4 pb-20">
+                  {activeTab === "生成済み一覧" ? (
+                    Object.values(generatedScenarios).length > 0 ? (
+                      Object.values(generatedScenarios).map(scenario => (
+                         <CaseCard
+                           key={scenario.id}
+                           item={cases.find(c => c.id === scenario.id) || { id: scenario.id, tag: "手動", text: scenario.scenario }}
+                           isFavorite={true}
+                           toggleFavorite={() => {}} // 生成済みからはお気に入り解除しない
+                           generatedData={scenario}
+                           onGenerate={() => {}}
+                           onEdit={() => openEditForm(scenario.id)}
+                         />
+                      ))
+                    ) : (
+                      <div className="text-center py-12 text-gray-500 bg-white rounded-xl shadow-sm">生成されたシナリオはまだありません</div>
+                    )
+                  ) : (
+                    currentCategoryCases.map(item => (
+                      <CaseCard
+                        key={item.id}
+                        item={item}
+                        isFavorite={favorites.includes(item.id)}
+                        toggleFavorite={() => setFavorites(prev => prev.includes(item.id) ? prev.filter(id => id !== item.id) : [...prev, item.id])}
+                        generatedData={generatedScenarios[item.id]}
+                        onGenerate={() => generateScenario(item)}
+                        onEdit={() => openEditForm(item.id)}
+                      />
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+          </main>
+
+          {/* Settings Modal */}
+          {isSettingsOpen && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200">
+                <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+                  <h3 className="font-bold text-gray-800 flex items-center gap-2">
+                    <Icon name="settings" size={20} className="text-gray-500" />
+                    AI設定
+                  </h3>
+                  <button onClick={() => setIsSettingsOpen(false)} className="text-gray-400 hover:text-gray-600"><Icon name="x" size={20} /></button>
+                </div>
+                <div className="p-6 flex flex-col gap-5">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">API キー</label>
+                    <input
+                      type="password"
+                      value={apiKey}
+                      onChange={e => setApiKey(e.target.value)}
+                      placeholder="AI Studio API Key"
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                    />
+                    <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline mt-2 inline-flex items-center gap-1">
+                      Google AI StudioでAPIキーを取得 <Icon name="external-link" size={12} />
+                    </a>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">AI モデル</label>
+                    <select
+                      value={selectedModel}
+                      onChange={e => setSelectedModel(e.target.value)}
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                    >
+                      {AI_MODELS.map(model => (
+                        <option key={model} value={model}>{model}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="px-6 py-4 bg-gray-50 flex justify-end">
+                  <button onClick={() => setIsSettingsOpen(false)} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium shadow-sm">
+                    完了
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Form Modal */}
+          {isFormOpen && (
+            <ScenarioFormModal
+              initialData={editingCaseId ? generatedScenarios[editingCaseId] : null}
+              onClose={() => setIsFormOpen(false)}
+              onSave={saveFormData}
+            />
+          )}
+
+          {/* Toast Notification */}
+          {notification && (
+            <div className={`fixed bottom-4 right-4 px-6 py-3 rounded-lg shadow-lg text-white font-medium flex items-center gap-2 animate-in slide-in-from-bottom-5 ${notification.type === 'info' ? 'bg-blue-600' : 'bg-gray-800'}`}>
+              <Icon name={notification.type === 'info' ? "info" : "check-circle"} size={20} />
+              {notification.message}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ==========================================
+    // 個別カードコンポーネント
+    // ==========================================
+    const CaseCard = ({ item, isFavorite, toggleFavorite, generatedData, onGenerate, onEdit }) => {
+      const [isOpen, setIsOpen] = React.useState(false);
+      const [viewMode, setViewMode] = React.useState('tehon'); // 'tehon' or 'hatsumon'
+      const [isGenerating, setIsGenerating] = React.useState(false);
+
+      const handleGenerate = async (e) => {
+        e.stopPropagation();
+        setIsGenerating(true);
+        await onGenerate();
+        setIsGenerating(false);
+        setIsOpen(true);
+      };
+
+      const handleEdit = (e) => {
+        e.stopPropagation();
+        onEdit();
+      };
+
+      return (
+        <div className={`bg-white rounded-xl shadow-sm border transition-all ${isFavorite ? 'border-yellow-300 shadow-md' : 'border-gray-200'}`}>
+          <div className="p-4 flex flex-col sm:flex-row gap-4 items-start sm:items-center cursor-pointer" onClick={() => generatedData && setIsOpen(!isOpen)}>
+            
+            {/* Fav Button */}
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleFavorite(); }}
+              className={`flex-shrink-0 p-2 rounded-full transition-colors ${isFavorite ? 'bg-yellow-100 text-yellow-500' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}`}
+              title="候補にする"
+            >
+              <Icon name="star" size={24} className={isFavorite ? "fill-current" : ""} />
+            </button>
+
+            {/* Content */}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                <span className="px-2.5 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-md font-medium border border-gray-200">
+                  {item.tag}
+                </span>
+                {generatedData && (
+                  <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-md font-bold flex items-center gap-1 border border-green-200">
+                    <Icon name="check" size={12} /> 生成済み
+                  </span>
+                )}
+              </div>
+              <p className="text-gray-800 leading-relaxed text-sm sm:text-base">{item.text}</p>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+               {generatedData && (
+                 <button onClick={handleEdit} className="text-gray-500 hover:text-blue-600 p-2 bg-gray-50 rounded-lg border border-gray-200" title="編集">
+                    <Icon name="edit-3" size={18} />
+                 </button>
+               )}
+               <button
+                  onClick={handleGenerate}
+                  disabled={isGenerating}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors border ${
+                    generatedData 
+                      ? 'bg-gray-50 text-gray-700 hover:bg-gray-100 border-gray-200' 
+                      : 'bg-blue-600 text-white hover:bg-blue-700 border-blue-600 shadow-sm'
+                  }`}
+               >
+                  {isGenerating ? <div className="loader w-4 h-4 border-2 border-t-current"></div> : <Icon name="wand-2" size={16} />}
+                  {generatedData ? '再生成' : 'AIで生成'}
+               </button>
+               {generatedData && (
+                 <Icon name={isOpen ? "chevron-up" : "chevron-down"} size={20} className="text-gray-400 ml-2" />
+               )}
+            </div>
+          </div>
+
+          {/* Preview Accordion */}
+          {generatedData && isOpen && (
+            <div className="border-t border-gray-100 bg-slate-50 p-4 rounded-b-xl animate-in slide-in-from-top-2">
+               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4">
+                 <div>
+                   <h4 className="font-bold text-lg text-gray-800">{generatedData.label}</h4>
+                   <p className="text-sm text-gray-500 mt-1"><span className="font-semibold text-gray-700">目標:</span> {generatedData.goal}</p>
+                 </div>
+                 
+                 {/* Toggle */}
+                 <div className="flex items-center gap-3 bg-white px-4 py-2 rounded-xl border shadow-sm self-start sm:self-auto">
+                    <span className={`text-sm font-bold ${viewMode === 'tehon' ? 'text-blue-600' : 'text-gray-400'}`}>手本</span>
+                    <label className="flex items-center cursor-pointer">
+                      <div className="relative">
+                        <input type="checkbox" className="sr-only toggle-checkbox" checked={viewMode === 'hatsumon'} onChange={() => setViewMode(viewMode === 'tehon' ? 'hatsumon' : 'tehon')} />
+                        <div className="toggle-label"></div>
+                      </div>
+                    </label>
+                    <span className={`text-sm font-bold ${viewMode === 'hatsumon' ? 'text-blue-600' : 'text-gray-400'}`}>発問</span>
+                 </div>
+               </div>
+
+               {/* Panels */}
+               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                 {(viewMode === 'tehon' ? generatedData.panelsTehon : generatedData.panelsHatsumon).map((panel, idx) => (
+                   <div key={idx} className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm flex flex-col">
+                     <div className="bg-gray-100 px-3 py-1.5 text-xs font-bold text-gray-500 border-b">
+                       {idx + 1}コマ目
+                     </div>
+                     <div className="p-3 flex-1 flex flex-col gap-2">
+                       <div className="text-sm text-gray-700 italic bg-gray-50 p-2 rounded flex-1">
+                         <Icon name="image" size={14} className="inline mr-1 text-gray-400" />
+                         {panel.scene}
+                       </div>
+                       <div className="text-sm font-medium text-gray-900 border-l-4 border-blue-500 pl-2 py-1">
+                         "{panel.dialogue}"
+                       </div>
+                     </div>
+                   </div>
+                 ))}
+               </div>
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // ==========================================
+    // 編集・新規作成フォームモーダル
+    // ==========================================
+    const ScenarioFormModal = ({ initialData, onClose, onSave }) => {
+      const [formData, setFormData] = React.useState(initialData || {
+        label: "", title: "", scenario: "", goal: "", hasTehon: true, hasHatsumon: true,
+        panelsTehon: [ {scene:"", dialogue:""}, {scene:"", dialogue:""}, {scene:"", dialogue:""}, {scene:"", dialogue:""} ],
+        panelsHatsumon: [ {scene:"", dialogue:""}, {scene:"", dialogue:""}, {scene:"", dialogue:""}, {scene:"", dialogue:""} ]
+      });
+      const [activeTab, setActiveTab] = React.useState('tehon');
+
+      const handleChange = (e) => {
+        const { name, value } = e.target;
+        setFormData(prev => ({ ...prev, [name]: value }));
+      };
+
+      const handlePanelChange = (type, index, field, value) => {
+        const newPanels = [...formData[type]];
+        newPanels[index] = { ...newPanels[index], [field]: value };
+        setFormData(prev => ({ ...prev, [type]: newPanels }));
+      };
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        onSave(formData);
+      };
+
+      return (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-2 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl w-full max-w-4xl shadow-2xl flex flex-col max-h-[90vh]">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50 rounded-t-2xl sticky top-0 z-10">
+              <h3 className="font-bold text-lg text-gray-800 flex items-center gap-2">
+                <Icon name="edit" size={20} className="text-blue-600" />
+                {initialData ? "シナリオ編集" : "新規シナリオ作成"}
+              </h3>
+              <button onClick={onClose} className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-full transition-colors"><Icon name="x" size={20} /></button>
+            </div>
+
+            {/* Form Body */}
+            <div className="p-6 overflow-y-auto flex-1 custom-scrollbar">
+              <div className="bg-blue-50 border border-blue-200 text-blue-800 p-4 rounded-xl mb-6 flex gap-3 text-sm">
+                <Icon name="info" size={20} className="flex-shrink-0 text-blue-600 mt-0.5" />
+                <div>
+                  <strong>重要：ルビの入力ルール</strong><br/>
+                  「説明文」「ねらい」「セリフ」を入力する際は、必ず<span className="bg-yellow-200 px-1 rounded">漢字の直後に半角カッコとひらがな</span>でルビを入れてください。<br/>
+                  例：学校(がっこう)に 行(い)く。
+                </div>
+              </div>
+
+              <form id="scenario-form" onSubmit={handleSubmit} className="flex flex-col gap-5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+                  <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1">ラベル (管理用短い名前)</label>
+                    <input type="text" name="label" value={formData.label} onChange={handleChange} required className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例: 手洗いを嫌がる" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1">プリントタイトル</label>
+                    <input type="text" name="title" value={formData.title} onChange={handleChange} required className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例: 清潔(せいけつ)な 生活(せいかつ)" />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">場面の説明文 <span className="text-xs font-normal text-blue-600 ml-2">※ルビ必須</span></label>
+                  <textarea name="scenario" value={formData.scenario} onChange={handleChange} required rows={2} className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none resize-y" placeholder="例: 外(そと)から 帰(かえ)って きたとき..." />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-1">指導のねらい <span className="text-xs font-normal text-blue-600 ml-2">※ルビ必須</span></label>
+                  <textarea name="goal" value={formData.goal} onChange={handleChange} required rows={2} className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none resize-y" placeholder="例: 手(て)を 洗(あら)う ことが 大切(たいせつ)です。" />
+                </div>
+
+                {/* Panels Editing */}
+                <div className="mt-4 border-t pt-6">
+                   <div className="flex gap-2 mb-4">
+                     <button type="button" onClick={() => setActiveTab('tehon')} className={`px-4 py-2 rounded-lg font-bold text-sm transition-colors ${activeTab === 'tehon' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>手本 (うまくいく例)</button>
+                     <button type="button" onClick={() => setActiveTab('hatsumon')} className={`px-4 py-2 rounded-lg font-bold text-sm transition-colors ${activeTab === 'hatsumon' ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}>発問 (考えさせる例)</button>
+                   </div>
+                   
+                   <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                     <div className="text-xs text-gray-500 mb-4 bg-white p-3 rounded border shadow-sm">
+                       {activeTab === 'tehon' ? (
+                         <ul className="list-disc pl-4 space-y-1">
+                           <li><strong>1コマ目:</strong> 問題となる場面の発生</li>
+                           <li><strong>2コマ目:</strong> その結果どうなるか、周りの反応など</li>
+                           <li><strong>3コマ目:</strong> 解決策（ポイント）に気づく、または実践する</li>
+                           <li><strong>4コマ目:</strong> うまくできた結果（笑顔など）</li>
+                         </ul>
+                       ) : (
+                         <ul className="list-disc pl-4 space-y-1">
+                           <li><strong>1コマ目:</strong> 問題となる場面の発生</li>
+                           <li><strong>2コマ目:</strong> その結果どうなるか、周りの反応など</li>
+                           <li><strong>3コマ目:</strong> 周りからの働きかけや解決のポイント提示</li>
+                           <li><strong>4コマ目:</strong> 解決できない状態や、本人がポイントを受け入れない様子</li>
+                         </ul>
+                       )}
+                     </div>
+
+                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                       {formData[activeTab === 'tehon' ? 'panelsTehon' : 'panelsHatsumon'].map((panel, idx) => (
+                         <div key={idx} className="bg-white p-3 rounded-lg border shadow-sm">
+                           <div className="font-bold text-sm text-gray-600 mb-2 border-b pb-1">{idx + 1}コマ目</div>
+                           <div className="flex flex-col gap-3">
+                             <div>
+                               <label className="block text-xs font-semibold text-gray-500 mb-1">情景 (ルビ不要)</label>
+                               <input type="text" value={panel.scene} onChange={e => handlePanelChange(activeTab === 'tehon' ? 'panelsTehon' : 'panelsHatsumon', idx, 'scene', e.target.value)} required className="w-full text-sm border border-gray-300 rounded px-2 py-1.5 focus:border-blue-500 outline-none bg-gray-50" />
+                             </div>
+                             <div>
+                               <label className="block text-xs font-semibold text-gray-500 mb-1 text-blue-600">セリフ・心の声 (ルビ必須)</label>
+                               <textarea value={panel.dialogue} onChange={e => handlePanelChange(activeTab === 'tehon' ? 'panelsTehon' : 'panelsHatsumon', idx, 'dialogue', e.target.value)} required rows={2} className="w-full text-sm border border-gray-300 rounded px-2 py-1.5 focus:border-blue-500 outline-none resize-none" />
+                             </div>
+                           </div>
+                         </div>
+                       ))}
+                     </div>
+                   </div>
+                </div>
+              </form>
+            </div>
+            
+            {/* Footer */}
+            <div className="px-6 py-4 bg-gray-50 border-t border-gray-100 rounded-b-2xl flex justify-end gap-3 sticky bottom-0">
+              <button type="button" onClick={onClose} className="px-5 py-2 rounded-lg font-medium text-gray-600 hover:bg-gray-200 transition-colors">キャンセル</button>
+              <button type="submit" form="scenario-form" className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium shadow-sm transition-colors flex items-center gap-2">
+                <Icon name="save" size={18} /> 保存する
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
