@@ -32,11 +32,12 @@
     // ==========================================
     // アプリ設定・定数
     // ==========================================
+    // 最新のGeminiモデルリストに更新
     const AI_MODELS = [
-      'gemini-1.5-flash',
-      'gemini-1.5-pro',
+      'gemini-2.5-flash',
+      'gemini-2.5-pro',
       'gemini-2.0-flash',
-      'gemini-2.5-flash'
+      'gemini-2.0-flash-lite'
     ];
     
     const CATEGORIES = ["健康の保持", "心理的な安定", "人間関係の形成", "環境の把握", "身体の動き", "コミュニケーション"];
@@ -97,8 +98,6 @@
       const [notification, setNotification] = React.useState(null);
       const [isInitialized, setIsInitialized] = React.useState(false);
       const [isExportModalOpen, setIsExportModalOpen] = React.useState(false);
-      
-      // APIキーの表示・非表示を管理するStateを追加
       const [showApiKey, setShowApiKey] = React.useState(false);
 
       // --- オートセーブ (localStorage) ---
@@ -112,7 +111,7 @@
             if (parsed.generatedScenarios) setGeneratedScenarios(parsed.generatedScenarios);
             if (parsed.apiKey) setApiKey(parsed.apiKey);
             if (parsed.selectedModel) {
-               // 過去の不正なモデル名を自動でクリーンアップ
+               // 過去の古いモデル名(1.5系など)が保存されていた場合は、新しいデフォルトに強制アップデート
                let savedModel = parsed.selectedModel.replace('-latest', '').replace('preview-', '');
                setSelectedModel(AI_MODELS.includes(savedModel) ? savedModel : AI_MODELS[0]);
             }
@@ -253,9 +252,8 @@
         reader.readAsText(file);
       };
 
-      // --- AI生成処理 (自動判別＆自動フォールバック搭載) ---
+      // --- AI生成処理 ---
       const generateScenario = async (caseData) => {
-        // 1. 環境の自動判別
         const isCanvasPreview = window.location.hostname.includes('googleusercontent.com') || window.location.hostname === '';
 
         if (!apiKey && !isCanvasPreview) {
@@ -311,10 +309,8 @@
 
         try {
           const safeApiKey = apiKey.trim();
-          // 2. 最適なモデルの自動選択 (プレビュー環境なら強制的に専用モデル)
           let targetModel = isCanvasPreview ? 'gemini-2.5-flash-preview-09-2025' : selectedModel.trim();
 
-          // 通信処理を関数化（自動リトライ用）
           const attemptFetch = async (modelName) => {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${safeApiKey}`;
             return await fetch(url, {
@@ -329,13 +325,12 @@
 
           let response = await attemptFetch(targetModel);
 
-          // 3. 自動修復（オートフォールバック）: 404が出た場合は安定版(1.5-flash)で自動再試行する
-          if (response.status === 404 && !isCanvasPreview && targetModel !== 'gemini-1.5-flash') {
-            console.warn(`${targetModel} が利用できないため、最も安定した gemini-1.5-flash に自動フォールバックして再試行します。`);
-            targetModel = 'gemini-1.5-flash';
+          // 3. 自動修復（オートフォールバック）: 404が出た場合は最新安定版(2.5-flash)で自動再試行する
+          if (response.status === 404 && !isCanvasPreview && targetModel !== 'gemini-2.5-flash') {
+            console.warn(`${targetModel} が利用できないため、最も安定した gemini-2.5-flash に自動フォールバックして再試行します。`);
+            targetModel = 'gemini-2.5-flash';
             response = await attemptFetch(targetModel);
-            // 成功した場合は、設定画面の選択肢も自動で修正しておく
-            if (response.ok) setSelectedModel('gemini-1.5-flash');
+            if (response.ok) setSelectedModel('gemini-2.5-flash');
           }
 
           if (!response.ok) {
@@ -361,11 +356,10 @@
           return parsedData;
         } catch (err) {
           console.error(err);
-          // 429レートリミット時の親切なメッセージ
           if (err.message.includes('429')) {
-             alert(`【API制限エラー】\n短時間に生成しすぎたため、一時的にGoogle側から制限がかかりました。\n数分待ってから再度試すか、安定モデル(1.5-flash)に変更してください。`);
+             alert(`【API制限エラー】\n短時間に生成しすぎたため、一時的にGoogle側から制限がかかりました。\n数分待ってから再度試すか、安定モデル(2.5-flash等)に変更してください。`);
           } else {
-             alert(`【生成エラー】\n${err.message}\n\n※APIキーの権限不足などが考えられます。`);
+             alert(`【生成エラー】\n${err.message}\n\n※APIキーの権限不足や、モデル名が無効になっている可能性があります。`);
           }
           return null;
         }
@@ -388,7 +382,6 @@
           if (targetCase) {
             setBatchProgress({ current: i + 1, total: targets.length });
             await generateScenario(targetCase);
-            // API制限（429）を確実に回避するため、一括生成の待機時間をしっかり取る
             if (i < targets.length - 1) await new Promise(r => setTimeout(r, 6000));
           }
         }
