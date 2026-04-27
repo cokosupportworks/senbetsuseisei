@@ -336,7 +336,11 @@
           return parsedData;
         } catch (err) {
           console.error(err);
-          alert(`生成エラー: ${err.message}`);
+          if (err.message.includes('429')) {
+             alert("生成エラー (429): APIの利用制限に達しました。\n数分待ってから再度試すか、AI Studioで課金設定をご確認ください。");
+          } else {
+             alert(`生成エラー: ${err.message}`);
+          }
           return null;
         }
       };
@@ -358,8 +362,8 @@
           if (targetCase) {
             setBatchProgress({ current: i + 1, total: targets.length });
             await generateScenario(targetCase);
-            // レートリミット回避のためのウェイト (3秒)
-            if (i < targets.length - 1) await new Promise(r => setTimeout(r, 3000));
+            // レートリミット(429エラー)回避のためのウェイトを長めに設定 (5秒)
+            if (i < targets.length - 1) await new Promise(r => setTimeout(r, 5000));
           }
         }
 
@@ -455,33 +459,37 @@
                 <div className="bg-blue-600 p-2 rounded-lg text-white">
                   <Icon name="book-open" size={20} />
                 </div>
-                <h1 className="font-bold text-xl text-gray-800 hidden sm:block">漫画シナリオ選別＆生成機</h1>
+                <h1 className="font-bold text-xl text-gray-800 hidden lg:block">漫画シナリオ選別＆生成機</h1>
+                
+                {/* 新設・目立たせたAPI設定ボタン */}
+                <button onClick={() => setIsSettingsOpen(true)} className="ml-2 flex items-center gap-1.5 px-3 py-1.5 text-sm font-bold text-gray-700 bg-gray-100 border border-gray-200 rounded-full hover:bg-gray-200 transition-colors shadow-sm" title="AIモデルやAPIキーの設定">
+                  <Icon name="settings" size={16} />
+                  <span>API設定</span>
+                </button>
               </div>
-              <div className="flex items-center gap-2 sm:gap-4">
-                <div className="text-sm font-medium text-gray-600 bg-gray-100 px-3 py-1.5 rounded-full flex items-center gap-2">
+              
+              <div className="flex items-center gap-2 sm:gap-4 overflow-x-auto hide-scrollbar">
+                <div className="text-sm font-medium text-gray-600 bg-gray-100 px-3 py-1.5 rounded-full flex items-center gap-2 whitespace-nowrap">
                   <Icon name="star" size={16} className="text-yellow-500 fill-current" />
                   <span>総合お気に入り: {totalFavs}件</span>
                 </div>
                 
                 {/* 読込・保存ボタンを分かりやすく強調 */}
-                <label className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors cursor-pointer shadow-sm" title="ファイルから読み込み (事例データやバックアップ)">
+                <label className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors cursor-pointer shadow-sm whitespace-nowrap" title="ファイルから読み込み (事例データやバックアップ)">
                   <Icon name="folder-up" size={16} />
                   <span className="hidden sm:inline">データ読込</span>
                   <input type="file" className="hidden" accept=".txt,.js,.json" onChange={handleFileUpload} />
                 </label>
                 
-                <button onClick={handleBackupSave} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors shadow-sm" title="現在の作業状態をまるごと保存">
+                <button onClick={handleBackupSave} className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors shadow-sm whitespace-nowrap" title="現在の作業状態をまるごと保存">
                   <Icon name="save" size={16} />
                   <span className="hidden sm:inline">作業保存</span>
                 </button>
                 
-                <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-full transition-colors" title="設定">
-                  <Icon name="settings" size={20} />
-                </button>
-                <button onClick={resetData} className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors" title="新しく作成する">
+                <button onClick={resetData} className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors flex-shrink-0" title="新しく作成する">
                   <Icon name="trash-2" size={20} />
                 </button>
-                <button onClick={handleExport} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors shadow-sm">
+                <button onClick={handleExport} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors shadow-sm whitespace-nowrap">
                   <Icon name="download" size={16} />
                   <span className="hidden sm:inline">JSON書出し</span>
                 </button>
