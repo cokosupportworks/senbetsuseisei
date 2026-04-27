@@ -38,10 +38,10 @@
     // アプリ設定・定数
     // ==========================================
     const AI_MODELS = [
+      'gemini-1.5-flash-latest', // より確実なモデル名に変更
+      'gemini-1.5-pro-latest',
       'gemini-2.5-flash-preview-09-2025',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-      'gemini-1.5-pro'
+      'gemini-2.0-flash'
     ];
     
     const CATEGORIES = ["健康の保持", "心理的な安定", "人間関係の形成", "環境の把握", "身体の動き", "コミュニケーション"];
@@ -101,6 +101,7 @@
       const [batchProgress, setBatchProgress] = React.useState({ current: 0, total: 0 });
       const [notification, setNotification] = React.useState(null);
       const [isInitialized, setIsInitialized] = React.useState(false);
+      const [isExportModalOpen, setIsExportModalOpen] = React.useState(false); // 追加
 
       // --- オートセーブ (localStorage) ---
       React.useEffect(() => {
@@ -313,7 +314,11 @@
 }`;
 
         try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${apiKey}`;
+          // 空白混入による404エラーを防ぐため trim() を追加
+          const safeApiKey = apiKey.trim();
+          const safeModel = selectedModel.trim();
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:generateContent?key=${safeApiKey}`;
+          
           const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -323,10 +328,21 @@
             })
           });
 
-          if (!response.ok) throw new Error(`API Error: ${response.status}`);
+          // エラー時にGoogleからの詳細なエラーメッセージを取得して投げる
+          if (!response.ok) {
+            let errorMsg = `API Error: ${response.status}`;
+            try {
+              const errorData = await response.json();
+              if (errorData.error && errorData.error.message) {
+                errorMsg += `\n詳細: ${errorData.error.message}`;
+              }
+            } catch (e) { /* JSONパース失敗時は無視 */ }
+            throw new Error(errorMsg);
+          }
+          
           const data = await response.json();
           let text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (!text) throw new Error("No text returned from API");
+          if (!text) throw new Error("APIからテキストが返されませんでした");
           
           text = text.replace(/```json\n?|\n?```/g, '').trim();
           const parsedData = JSON.parse(text);
@@ -336,11 +352,8 @@
           return parsedData;
         } catch (err) {
           console.error(err);
-          if (err.message.includes('429')) {
-             alert("生成エラー (429): APIの利用制限に達しました。\n数分待ってから再度試すか、AI Studioで課金設定をご確認ください。");
-          } else {
-             alert(`生成エラー: ${err.message}`);
-          }
+          // エラーメッセージをそのまま表示するよう変更
+          alert(`【生成エラー】\n${err.message}\n\n※404が出る場合は、APIキーが間違っているか、プロジェクトでAPIが有効化されていない可能性があります。`);
           return null;
         }
       };
@@ -408,6 +421,55 @@
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
         showNotification("scenarios.json をダウンロードしました");
+      };
+
+      // --- コード出力（コピペ用）処理 ---
+      const getExportCodeString = () => {
+        const scenariosData = {
+          "1．健康の保持": [],
+          "2．心理的な安定": [],
+          "3．人間関係の形成": [],
+          "4．環境の把握": [],
+          "5．身体の動き": [],
+          "6．コミュニケーション": []
+        };
+
+        Object.values(generatedScenarios).forEach(scn => {
+          const originalCase = cases.find(c => c.id === scn.id);
+          const catName = originalCase ? originalCase.category : CATEGORIES[0];
+          const exportKey = CATEGORY_MAP[catName] || CATEGORY_MAP["健康の保持"];
+          
+          const cleanScn = { ...scn };
+          delete cleanScn.id;
+          scenariosData[exportKey].push(cleanScn);
+        });
+
+        return `const presetScenarios = ${JSON.stringify(scenariosData, null, 2)};`;
+      };
+
+      const handleCopyToClipboard = async () => {
+        try {
+          const codeStr = getExportCodeString();
+          if (navigator.clipboard && window.isSecureContext) {
+              await navigator.clipboard.writeText(codeStr);
+          } else {
+              // fallback
+              const textArea = document.createElement("textarea");
+              textArea.value = codeStr;
+              textArea.style.position = "fixed";
+              textArea.style.left = "-999999px";
+              textArea.style.top = "-999999px";
+              document.body.appendChild(textArea);
+              textArea.focus();
+              textArea.select();
+              document.execCommand('copy');
+              textArea.remove();
+          }
+          showNotification("クリップボードにコピーしました");
+          setIsExportModalOpen(false);
+        } catch (err) {
+          alert("コピーに失敗しました。テキストを手動で選択してコピーしてください。");
+        }
       };
 
       // --- 手動編集/作成関連 ---
@@ -489,9 +551,12 @@
                 <button onClick={resetData} className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-full transition-colors flex-shrink-0" title="新しく作成する">
                   <Icon name="trash-2" size={20} />
                 </button>
-                <button onClick={handleExport} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors shadow-sm whitespace-nowrap">
-                  <Icon name="download" size={16} />
-                  <span className="hidden sm:inline">JSON書出し</span>
+                <button onClick={handleExport} className="p-2 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded-full transition-colors flex-shrink-0" title="scenarios.jsonとしてダウンロード">
+                  <Icon name="download" size={20} />
+                </button>
+                <button onClick={() => setIsExportModalOpen(true)} className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors shadow-sm whitespace-nowrap">
+                  <Icon name="copy" size={16} />
+                  <span className="hidden sm:inline">コード出力</span>
                 </button>
               </div>
             </div>
@@ -660,6 +725,37 @@
               onClose={() => setIsFormOpen(false)}
               onSave={saveFormData}
             />
+          )}
+
+          {/* Export Modal (コピペ用コード画面) */}
+          {isExportModalOpen && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl w-full max-w-3xl overflow-hidden shadow-2xl animate-in fade-in zoom-in duration-200 flex flex-col max-h-[90vh]">
+                <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
+                  <h3 className="font-bold text-gray-800 flex items-center gap-2">
+                    <Icon name="code" size={20} className="text-gray-500" />
+                    コピペ用コード出力
+                  </h3>
+                  <button onClick={() => setIsExportModalOpen(false)} className="text-gray-400 hover:text-gray-600"><Icon name="x" size={20} /></button>
+                </div>
+                <div className="p-6 flex-1 overflow-y-auto">
+                  <p className="text-sm text-gray-600 mb-3">
+                    以下のコードをコピーし、4コマ漫画作成アプリの <code>const presetScenarios = ...</code> の部分に上書き貼り付けしてください。
+                  </p>
+                  <textarea 
+                    readOnly
+                    className="w-full h-[50vh] p-4 bg-gray-900 text-gray-100 font-mono text-sm rounded-lg outline-none resize-none custom-scrollbar"
+                    value={getExportCodeString()}
+                  />
+                </div>
+                <div className="px-6 py-4 bg-gray-50 flex justify-end gap-3 border-t border-gray-100">
+                  <button onClick={() => setIsExportModalOpen(false)} className="px-5 py-2 rounded-lg font-medium text-gray-600 hover:bg-gray-200 transition-colors">閉じる</button>
+                  <button onClick={handleCopyToClipboard} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium shadow-sm flex items-center gap-2">
+                    <Icon name="copy" size={18} /> クリップボードにコピー
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
 
           {/* Toast Notification */}
