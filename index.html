@@ -32,12 +32,11 @@
     // ==========================================
     // アプリ設定・定数
     // ==========================================
-    // ここが原因でした。Googleの現在の正しいモデル名に修正しました。
     const AI_MODELS = [
       'gemini-1.5-flash',
       'gemini-1.5-pro',
-      'gemini-2.5-flash-preview-09-2025',
-      'gemini-2.0-flash'
+      'gemini-2.0-flash',
+      'gemini-2.5-flash'
     ];
     
     const CATEGORIES = ["健康の保持", "心理的な安定", "人間関係の形成", "環境の把握", "身体の動き", "コミュニケーション"];
@@ -98,6 +97,9 @@
       const [notification, setNotification] = React.useState(null);
       const [isInitialized, setIsInitialized] = React.useState(false);
       const [isExportModalOpen, setIsExportModalOpen] = React.useState(false);
+      
+      // APIキーの表示・非表示を管理するStateを追加
+      const [showApiKey, setShowApiKey] = React.useState(false);
 
       // --- オートセーブ (localStorage) ---
       React.useEffect(() => {
@@ -110,11 +112,8 @@
             if (parsed.generatedScenarios) setGeneratedScenarios(parsed.generatedScenarios);
             if (parsed.apiKey) setApiKey(parsed.apiKey);
             if (parsed.selectedModel) {
-               // 古い保存データ(latest付き)が選ばれていた場合は、正しい名前にフォールバックする
-               let savedModel = parsed.selectedModel;
-               if (savedModel.includes('-latest')) {
-                   savedModel = savedModel.replace('-latest', '');
-               }
+               // 過去の不正なモデル名を自動でクリーンアップ
+               let savedModel = parsed.selectedModel.replace('-latest', '').replace('preview-', '');
                setSelectedModel(AI_MODELS.includes(savedModel) ? savedModel : AI_MODELS[0]);
             }
           } catch (e) {
@@ -181,7 +180,6 @@
             try {
               const parsedJson = JSON.parse(content);
 
-              // 1. 作業バックアップデータの復元か判定
               if (parsedJson.isWorkspaceBackup) {
                 if (window.confirm("バックアップデータを読み込みます。現在の作業状態は上書きされますがよろしいですか？")) {
                   setCases(parsedJson.cases || []);
@@ -193,7 +191,6 @@
                 return;
               }
 
-              // 2. scenarios.jsonのインポートか判定
               if (parsedJson.scenarios) {
                 const importedScenarios = {};
                 const importedCases = [];
@@ -227,7 +224,6 @@
             }
           }
 
-          // CASES_DATA (テキスト/JS) のパース
           try {
             const startIndex = content.indexOf('[');
             const endIndex = content.lastIndexOf(']');
@@ -257,8 +253,9 @@
         reader.readAsText(file);
       };
 
-      // --- AI生成処理 ---
+      // --- AI生成処理 (自動判別＆自動フォールバック搭載) ---
       const generateScenario = async (caseData) => {
+        // 1. 環境の自動判別
         const isCanvasPreview = window.location.hostname.includes('googleusercontent.com') || window.location.hostname === '';
 
         if (!apiKey && !isCanvasPreview) {
@@ -314,17 +311,32 @@
 
         try {
           const safeApiKey = apiKey.trim();
-          const safeModel = selectedModel.trim();
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${safeModel}:generateContent?key=${safeApiKey}`;
-          
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { responseMimeType: "application/json" }
-            })
-          });
+          // 2. 最適なモデルの自動選択 (プレビュー環境なら強制的に専用モデル)
+          let targetModel = isCanvasPreview ? 'gemini-2.5-flash-preview-09-2025' : selectedModel.trim();
+
+          // 通信処理を関数化（自動リトライ用）
+          const attemptFetch = async (modelName) => {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${safeApiKey}`;
+            return await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { responseMimeType: "application/json" }
+              })
+            });
+          };
+
+          let response = await attemptFetch(targetModel);
+
+          // 3. 自動修復（オートフォールバック）: 404が出た場合は安定版(1.5-flash)で自動再試行する
+          if (response.status === 404 && !isCanvasPreview && targetModel !== 'gemini-1.5-flash') {
+            console.warn(`${targetModel} が利用できないため、最も安定した gemini-1.5-flash に自動フォールバックして再試行します。`);
+            targetModel = 'gemini-1.5-flash';
+            response = await attemptFetch(targetModel);
+            // 成功した場合は、設定画面の選択肢も自動で修正しておく
+            if (response.ok) setSelectedModel('gemini-1.5-flash');
+          }
 
           if (!response.ok) {
             let errorMsg = `API Error: ${response.status}`;
@@ -349,7 +361,12 @@
           return parsedData;
         } catch (err) {
           console.error(err);
-          alert(`【生成エラー】\n${err.message}\n\n※APIキーの設定やモデル名をご確認ください。`);
+          // 429レートリミット時の親切なメッセージ
+          if (err.message.includes('429')) {
+             alert(`【API制限エラー】\n短時間に生成しすぎたため、一時的にGoogle側から制限がかかりました。\n数分待ってから再度試すか、安定モデル(1.5-flash)に変更してください。`);
+          } else {
+             alert(`【生成エラー】\n${err.message}\n\n※APIキーの権限不足などが考えられます。`);
+          }
           return null;
         }
       };
@@ -361,7 +378,7 @@
           return;
         }
 
-        if (!window.confirm(`${targets.length}件のシナリオを連続生成します。よろしいですか？\n（API制限を避けるため時間がかかります）`)) return;
+        if (!window.confirm(`${targets.length}件のシナリオを連続生成します。よろしいですか？\n（API制限を避けるため、1件ごとに待機時間を設けます）`)) return;
 
         setIsGeneratingBatch(true);
         setBatchProgress({ current: 0, total: targets.length });
@@ -371,7 +388,8 @@
           if (targetCase) {
             setBatchProgress({ current: i + 1, total: targets.length });
             await generateScenario(targetCase);
-            if (i < targets.length - 1) await new Promise(r => setTimeout(r, 5000));
+            // API制限（429）を確実に回避するため、一括生成の待機時間をしっかり取る
+            if (i < targets.length - 1) await new Promise(r => setTimeout(r, 6000));
           }
         }
 
@@ -649,26 +667,39 @@
                 <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
                   <h3 className="font-bold text-gray-800 flex items-center gap-2">
                     <Icon name="settings" size={20} className="text-gray-500" />
-                    API設定
+                    API設定 <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded ml-2">自動最適化搭載</span>
                   </h3>
                   <button onClick={() => setIsSettingsOpen(false)} className="text-gray-400 hover:text-gray-600"><Icon name="x" size={20} /></button>
                 </div>
                 <div className="p-6 flex flex-col gap-5">
+                  <p className="text-xs text-gray-500 leading-relaxed bg-gray-50 p-3 rounded-lg">
+                    アプリの利用環境やAPIキーの権限を判別し、<strong>最も確実に動作するモデルへ自動で切り替える機能（オートフォールバック）</strong>を搭載しています。モデル選びに迷った場合はデフォルトのままで問題ありません。
+                  </p>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">API キー</label>
-                    <input
-                      type="password"
-                      value={apiKey}
-                      onChange={e => setApiKey(e.target.value)}
-                      placeholder="AI Studio API Key"
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                    />
+                    <div className="relative">
+                      <input
+                        type={showApiKey ? "text" : "password"}
+                        value={apiKey}
+                        onChange={e => setApiKey(e.target.value)}
+                        placeholder="AI Studio API Key"
+                        className="w-full border border-gray-300 rounded-lg px-3 py-2 pr-10 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                      />
+                      <button 
+                        type="button"
+                        onClick={() => setShowApiKey(!showApiKey)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                        title={showApiKey ? "パスワードを隠す" : "パスワードを表示する"}
+                      >
+                        <Icon name={showApiKey ? "eye-off" : "eye"} size={18} />
+                      </button>
+                    </div>
                     <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline mt-2 inline-flex items-center gap-1">
                       Google AI StudioでAPIキーを取得 <Icon name="external-link" size={12} />
                     </a>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">AI モデル</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">優先AIモデル</label>
                     <select
                       value={selectedModel}
                       onChange={e => setSelectedModel(e.target.value)}
