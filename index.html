@@ -32,12 +32,11 @@
     // ==========================================
     // アプリ設定・定数
     // ==========================================
-    // 最新のGeminiモデルリストに更新
     const AI_MODELS = [
       'gemini-2.5-flash',
       'gemini-2.5-pro',
       'gemini-2.0-flash',
-      'gemini-2.0-flash-lite'
+      'LM Studio (Local)' // ローカルAIモード
     ];
     
     const CATEGORIES = ["健康の保持", "心理的な安定", "人間関係の形成", "環境の把握", "身体の動き", "コミュニケーション"];
@@ -86,11 +85,15 @@
       const [cases, setCases] = React.useState([]);
       const [favorites, setFavorites] = React.useState([]);
       const [generatedScenarios, setGeneratedScenarios] = React.useState({});
+      
+      // API設定系
       const [apiKey, setApiKey] = React.useState('');
       const [selectedModel, setSelectedModel] = React.useState(AI_MODELS[0]);
+      const [lmStudioEndpoint, setLmStudioEndpoint] = React.useState('http://localhost:1234/v1/chat/completions');
       
       const [activeTab, setActiveTab] = React.useState(CATEGORIES[0]);
       const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+      const [isLmStudioGuideOpen, setIsLmStudioGuideOpen] = React.useState(false); 
       const [isFormOpen, setIsFormOpen] = React.useState(false);
       const [editingCaseId, setEditingCaseId] = React.useState(null);
       const [isGeneratingBatch, setIsGeneratingBatch] = React.useState(false);
@@ -110,8 +113,8 @@
             if (parsed.favorites) setFavorites(parsed.favorites);
             if (parsed.generatedScenarios) setGeneratedScenarios(parsed.generatedScenarios);
             if (parsed.apiKey) setApiKey(parsed.apiKey);
+            if (parsed.lmStudioEndpoint) setLmStudioEndpoint(parsed.lmStudioEndpoint);
             if (parsed.selectedModel) {
-               // 過去の古いモデル名(1.5系など)が保存されていた場合は、新しいデフォルトに強制アップデート
                let savedModel = parsed.selectedModel.replace('-latest', '').replace('preview-', '');
                setSelectedModel(AI_MODELS.includes(savedModel) ? savedModel : AI_MODELS[0]);
             }
@@ -124,10 +127,10 @@
 
       React.useEffect(() => {
         if (isInitialized) {
-          const stateToSave = { cases, favorites, generatedScenarios, apiKey, selectedModel };
+          const stateToSave = { cases, favorites, generatedScenarios, apiKey, selectedModel, lmStudioEndpoint };
           localStorage.setItem('scenarioMakerState', JSON.stringify(stateToSave));
         }
-      }, [cases, favorites, generatedScenarios, apiKey, selectedModel, isInitialized]);
+      }, [cases, favorites, generatedScenarios, apiKey, selectedModel, lmStudioEndpoint, isInitialized]);
 
       const showNotification = (message, type = 'success') => {
         setNotification({ message, type });
@@ -252,11 +255,14 @@
         reader.readAsText(file);
       };
 
-      // --- AI生成処理 ---
+      // --- AI生成処理 (Gemini / LM Studio 両対応) ---
       const generateScenario = async (caseData) => {
         const isCanvasPreview = window.location.hostname.includes('googleusercontent.com') || window.location.hostname === '';
+        
+        // LM Studio使用時はAPIキー不要
+        const isLocalMode = selectedModel === 'LM Studio (Local)';
 
-        if (!apiKey && !isCanvasPreview) {
+        if (!isLocalMode && !apiKey && !isCanvasPreview) {
           alert("設定画面からAPIキーを入力してください。");
           setIsSettingsOpen(true);
           return null;
@@ -309,25 +315,39 @@
 
         try {
           const safeApiKey = apiKey.trim();
-          let targetModel = isCanvasPreview ? 'gemini-2.5-flash-preview-09-2025' : selectedModel.trim();
+          let targetModel = isCanvasPreview && !isLocalMode ? 'gemini-2.5-flash-preview-09-2025' : selectedModel.trim();
 
           const attemptFetch = async (modelName) => {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${safeApiKey}`;
-            return await fetch(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { responseMimeType: "application/json" }
-              })
-            });
+            if (modelName === 'LM Studio (Local)') {
+              const url = lmStudioEndpoint.trim();
+              return await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  messages: [
+                    { role: "system", content: "You are an assistant that strictly outputs valid JSON only. Do not add markdown blocks or explanations." },
+                    { role: "user", content: prompt }
+                  ],
+                  temperature: 0.7
+                })
+              });
+            } else {
+              const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${safeApiKey}`;
+              return await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contents: [{ parts: [{ text: prompt }] }],
+                  generationConfig: { responseMimeType: "application/json" }
+                })
+              });
+            }
           };
 
           let response = await attemptFetch(targetModel);
 
-          // 3. 自動修復（オートフォールバック）: 404が出た場合は最新安定版(2.5-flash)で自動再試行する
-          if (response.status === 404 && !isCanvasPreview && targetModel !== 'gemini-2.5-flash') {
-            console.warn(`${targetModel} が利用できないため、最も安定した gemini-2.5-flash に自動フォールバックして再試行します。`);
+          if (!isLocalMode && response.status === 404 && !isCanvasPreview && targetModel !== 'gemini-2.5-flash') {
+            console.warn(`${targetModel} が利用できないため、gemini-2.5-flash に自動フォールバックして再試行します。`);
             targetModel = 'gemini-2.5-flash';
             response = await attemptFetch(targetModel);
             if (response.ok) setSelectedModel('gemini-2.5-flash');
@@ -345,21 +365,36 @@
           }
           
           const data = await response.json();
-          let text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          let text = "";
+          
+          if (targetModel === 'LM Studio (Local)') {
+              text = data.choices?.[0]?.message?.content;
+          } else {
+              text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+          }
+
           if (!text) throw new Error("APIからテキストが返されませんでした");
           
-          text = text.replace(/```json\n?|\n?```/g, '').trim();
+          text = text.replace(/```json\n?|\n?```/gi, '').trim();
+          const jsonMatch = text.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+              text = jsonMatch[0];
+          }
+
           const parsedData = JSON.parse(text);
           parsedData.id = caseData.id;
 
           setGeneratedScenarios(prev => ({ ...prev, [caseData.id]: parsedData }));
           return parsedData;
+
         } catch (err) {
           console.error(err);
-          if (err.message.includes('429')) {
-             alert(`【API制限エラー】\n短時間に生成しすぎたため、一時的にGoogle側から制限がかかりました。\n数分待ってから再度試すか、安定モデル(2.5-flash等)に変更してください。`);
+          if (err.message === 'Failed to fetch' || err.name === 'TypeError') {
+             alert(`【通信エラー】LM Studioに接続できませんでした。\n\n原因として以下が考えられます：\n1. LM Studioのサーバー(Local Server)がONになっていない\n2. このアプリをHTTPS環境（GitHub等）で開いているため、セキュリティ制限でローカルへ通信できない。\n\n※設定画面の「必読：通信できない方へ」を開き、手順をご確認ください。`);
+          } else if (err.message.includes('429')) {
+             alert(`【API制限エラー】\n短時間に生成しすぎたため、一時的にGoogle側から制限がかかりました。\n数分待ってから再度試すか、安定モデルに変更してください。`);
           } else {
-             alert(`【生成エラー】\n${err.message}\n\n※APIキーの権限不足や、モデル名が無効になっている可能性があります。`);
+             alert(`【生成エラー】\n${err.message}\n\n※ローカルLLMの場合は、出力されたJSONのフォーマットが崩れている可能性があります。`);
           }
           return null;
         }
@@ -372,7 +407,12 @@
           return;
         }
 
-        if (!window.confirm(`${targets.length}件のシナリオを連続生成します。よろしいですか？\n（API制限を避けるため、1件ごとに待機時間を設けます）`)) return;
+        const waitTime = selectedModel === 'LM Studio (Local)' ? 1000 : 6000;
+        const msg = selectedModel === 'LM Studio (Local)' 
+            ? `${targets.length}件のシナリオをローカルAIで連続生成します。よろしいですか？`
+            : `${targets.length}件のシナリオを連続生成します。よろしいですか？\n（API制限を避けるため、1件ごとに待機時間を設けます）`;
+
+        if (!window.confirm(msg)) return;
 
         setIsGeneratingBatch(true);
         setBatchProgress({ current: 0, total: targets.length });
@@ -382,7 +422,7 @@
           if (targetCase) {
             setBatchProgress({ current: i + 1, total: targets.length });
             await generateScenario(targetCase);
-            if (i < targets.length - 1) await new Promise(r => setTimeout(r, 6000));
+            if (i < targets.length - 1) await new Promise(r => setTimeout(r, waitTime));
           }
         }
 
@@ -497,7 +537,7 @@
       if (!isInitialized) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
 
       return (
-        <div className="min-h-screen flex flex-col">
+        <div className="min-h-screen flex flex-col relative">
           {/* Header */}
           <header className="bg-white shadow-sm sticky top-0 z-40">
             <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
@@ -660,53 +700,197 @@
                 <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-gray-50">
                   <h3 className="font-bold text-gray-800 flex items-center gap-2">
                     <Icon name="settings" size={20} className="text-gray-500" />
-                    API設定 <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded ml-2">自動最適化搭載</span>
+                    API設定
                   </h3>
                   <button onClick={() => setIsSettingsOpen(false)} className="text-gray-400 hover:text-gray-600"><Icon name="x" size={20} /></button>
                 </div>
-                <div className="p-6 flex flex-col gap-5">
-                  <p className="text-xs text-gray-500 leading-relaxed bg-gray-50 p-3 rounded-lg">
-                    アプリの利用環境やAPIキーの権限を判別し、<strong>最も確実に動作するモデルへ自動で切り替える機能（オートフォールバック）</strong>を搭載しています。モデル選びに迷った場合はデフォルトのままで問題ありません。
-                  </p>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">API キー</label>
-                    <div className="relative">
-                      <input
-                        type={showApiKey ? "text" : "password"}
-                        value={apiKey}
-                        onChange={e => setApiKey(e.target.value)}
-                        placeholder="AI Studio API Key"
-                        className="w-full border border-gray-300 rounded-lg px-3 py-2 pr-10 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
-                      />
-                      <button 
-                        type="button"
-                        onClick={() => setShowApiKey(!showApiKey)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                        title={showApiKey ? "パスワードを隠す" : "パスワードを表示する"}
-                      >
-                        <Icon name={showApiKey ? "eye-off" : "eye"} size={18} />
-                      </button>
-                    </div>
-                    <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline mt-2 inline-flex items-center gap-1">
-                      Google AI StudioでAPIキーを取得 <Icon name="external-link" size={12} />
-                    </a>
-                  </div>
+                <div className="p-6 flex flex-col gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">優先AIモデル</label>
                     <select
                       value={selectedModel}
                       onChange={e => setSelectedModel(e.target.value)}
-                      className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                      className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none bg-white font-medium"
                     >
                       {AI_MODELS.map(model => (
                         <option key={model} value={model}>{model}</option>
                       ))}
                     </select>
                   </div>
+
+                  {selectedModel !== 'LM Studio (Local)' ? (
+                    <div className="animate-in fade-in duration-300">
+                      <label className="block text-sm font-medium text-gray-700 mb-1">API キー</label>
+                      <div className="relative">
+                        <input
+                          type={showApiKey ? "text" : "password"}
+                          value={apiKey}
+                          onChange={e => setApiKey(e.target.value)}
+                          placeholder="AI Studio API Key"
+                          className="w-full border border-gray-300 rounded-lg px-3 py-2 pr-10 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                        />
+                        <button 
+                          type="button"
+                          onClick={() => setShowApiKey(!showApiKey)}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                          title={showApiKey ? "パスワードを隠す" : "パスワードを表示する"}
+                        >
+                          <Icon name={showApiKey ? "eye-off" : "eye"} size={18} />
+                        </button>
+                      </div>
+                      <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline mt-2 inline-flex items-center gap-1">
+                        Google AI StudioでAPIキーを取得 <Icon name="external-link" size={12} />
+                      </a>
+                    </div>
+                  ) : (
+                    <div className="bg-yellow-50 border border-yellow-200 p-4 rounded-xl shadow-inner mt-2 animate-in fade-in slide-in-from-top-2 duration-300">
+                      <div className="flex items-center justify-between mb-2">
+                        <label className="text-sm font-bold text-yellow-800 flex items-center gap-1">
+                          <Icon name="server" size={16} /> LM Studio 設定
+                        </label>
+                        {/* 魔法のボタン */}
+                        <button 
+                          onClick={() => setIsLmStudioGuideOpen(true)} 
+                          className="text-[11px] bg-red-500 hover:bg-red-600 text-white px-3 py-1.5 rounded-lg font-bold shadow-md transition-colors flex items-center gap-1 animate-pulse"
+                        >
+                          <Icon name="alert-triangle" size={14} /> 必読：通信できない方へ
+                        </button>
+                      </div>
+                      <input
+                        type="text"
+                        value={lmStudioEndpoint}
+                        onChange={e => setLmStudioEndpoint(e.target.value)}
+                        placeholder="http://localhost:1234/v1/chat/completions"
+                        className="w-full border border-yellow-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-yellow-500 outline-none bg-white text-sm text-gray-600 mb-2"
+                      />
+                    </div>
+                  )}
                 </div>
-                <div className="px-6 py-4 bg-gray-50 flex justify-end">
+                <div className="px-6 py-4 bg-gray-50 flex justify-end border-t border-gray-100">
                   <button onClick={() => setIsSettingsOpen(false)} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium shadow-sm">
                     完了
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ==========================================
+              LM Studio 超詳細ガイド モーダル (v0.3.x 最新版完全対応)
+             ========================================== */}
+          {isLmStudioGuideOpen && (
+            <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[70] p-2 sm:p-6 overflow-y-auto">
+              <div className="bg-slate-50 rounded-2xl w-full max-w-5xl shadow-2xl flex flex-col my-auto max-h-[95vh] animate-in fade-in zoom-in-95 duration-300 relative">
+                
+                {/* Guide Header */}
+                <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between bg-white rounded-t-2xl sticky top-0 z-20 shadow-sm">
+                  <div>
+                    <h3 className="font-extrabold text-xl text-blue-600 flex items-center gap-2">
+                      <Icon name="info" size={24} />
+                      LM Studio 最新バージョンでの設定方法
+                    </h3>
+                  </div>
+                  <button onClick={() => setIsLmStudioGuideOpen(false)} className="p-2 text-gray-400 hover:text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-full transition-colors"><Icon name="x" size={20} /></button>
+                </div>
+
+                {/* Guide Body */}
+                <div className="p-4 sm:p-6 overflow-y-auto custom-scrollbar flex flex-col gap-8 bg-gray-100">
+                  
+                  {/* アプリお引越しの手順 */}
+                  <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-md relative">
+                    <h4 className="font-bold text-xl text-blue-700 flex items-center gap-2 mb-4 border-b pb-2">
+                      <span className="bg-blue-600 text-white w-8 h-8 rounded-full flex items-center justify-center text-sm shadow-sm">1</span>
+                      【大前提】このアプリをダウンロードして開く
+                    </h4>
+                    <div className="flex flex-col md:flex-row gap-6 items-center">
+                      <div className="flex-1">
+                        <p className="text-gray-700 mb-4 leading-relaxed font-medium">
+                          現在のまま（GitHubなどネット上）では、ブラウザのセキュリティにブロックされてLM Studioと通信できません。<br/>
+                          必ずこの画面のコード（index.html）をパソコンにダウンロードし、<strong className="text-red-600">ダウンロードしたファイルをダブルクリックしてブラウザで開いて</strong>ご利用ください。
+                        </p>
+                      </div>
+                      <div className="w-full md:w-[350px] bg-blue-50 border border-blue-200 rounded-lg p-3 text-center text-sm text-blue-800 font-bold">
+                        URLバーが <code className="bg-white px-2 py-1 rounded text-red-600 shadow-sm">file:///.../index.html</code> となっていればOKです！
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 図解ステップ2：サーバー画面の開き方とサーバーの起動 */}
+                  <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-md relative">
+                    <h4 className="font-bold text-xl text-purple-700 flex items-center gap-2 mb-4 border-b pb-2">
+                      <span className="bg-purple-600 text-white w-8 h-8 rounded-full flex items-center justify-center text-sm shadow-sm">2</span>
+                      サーバー（Developer）画面を開き、Local ServerをONにする
+                    </h4>
+                    
+                    <div className="flex flex-col md:flex-row gap-6 items-center">
+                      <div className="flex-1">
+                        <p className="text-gray-700 mb-4 leading-relaxed font-medium">
+                          まずは、画面左端のメニューから<strong className="text-blue-600">「＜ ＞（Developer）」アイコン</strong>をクリックします。<br/>
+                          次に、右側のパネル（Endpointsタブ）にある<strong className="text-purple-600">「Local Server」というスイッチ</strong>をクリックして<strong className="text-green-600">緑色（ON）</strong>にしてください。<br/><br/>
+                          <span className="text-sm text-gray-500 bg-gray-100 p-2 rounded block mt-2">※実はお客様から頂いた画像では、すでにこのスイッチが緑色になっており、サーバーは無事起動できています！</span>
+                        </p>
+                      </div>
+                      
+                      {/* SVG Mockup: Latest LM Studio UI */}
+                      <div className="relative w-[320px] bg-[#1e1e2e] rounded-lg overflow-hidden border-2 border-gray-700 shadow-xl flex">
+                        {/* Left Menu */}
+                        <div className="w-12 bg-[#181825] flex flex-col items-center py-4 gap-6 border-r border-gray-800 relative">
+                          <Icon name="message-square" className="text-gray-500" size={20}/>
+                          <Icon name="folder" className="text-gray-500" size={20}/>
+                          <div className="relative w-full flex justify-center mt-2">
+                            <div className="bg-blue-600/30 p-2 rounded-lg text-blue-400 relative z-0">
+                              <Icon name="code" size={20}/>
+                            </div>
+                            <div className="absolute left-10 top-0 w-max z-20">
+                              <div className="bg-blue-600 text-white font-bold text-[10px] p-1.5 rounded shadow-lg whitespace-nowrap animate-pulse">
+                                👈 コレです
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        {/* Right Panel */}
+                        <div className="flex-1 bg-[#1e1e2e] p-3 flex flex-col gap-2">
+                          <div className="text-gray-300 font-bold text-xs border-b border-gray-700 pb-2">Endpoints</div>
+                          
+                          {/* Local Server Toggle Mockup */}
+                          <div className="relative bg-gray-800 p-2.5 rounded border border-gray-600 mt-2 flex justify-between items-center">
+                            <svg className="absolute -inset-2 w-[120%] h-[150%] pointer-events-none z-10" viewBox="0 0 200 100">
+                               <rect x="10" y="10" width="180" height="50" fill="none" stroke="#a855f7" strokeWidth="3" rx="4" className="animate-[pulse_1.5s_infinite]"/>
+                            </svg>
+                            <span className="text-sm text-gray-200 font-bold flex items-center gap-2">Local Server</span>
+                            <div className="w-9 h-5 bg-green-500 rounded-full relative shadow-inner">
+                              <div className="absolute right-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow-sm"></div>
+                            </div>
+                            <div className="absolute -bottom-8 left-1/2 transform -translate-x-1/2 w-max z-20">
+                              <div className="bg-purple-600 text-white font-bold text-[10px] px-2 py-1 rounded shadow-lg whitespace-nowrap">
+                                ☝️ ここが緑ならOK！
+                              </div>
+                            </div>
+                          </div>
+                          
+                          <div className="flex justify-between items-center mt-4">
+                            <span className="text-xs text-gray-400">Port</span>
+                            <span className="text-xs text-gray-300">1234</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ステップ3 */}
+                  <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm mt-2">
+                    <p className="text-gray-700 font-medium text-center">
+                      以上の設定ができたら、LM Studioはそのまま開いておき、<br/>
+                      このアプリの画面に戻って「完了」を押し、AI生成をお試しください！
+                    </p>
+                  </div>
+
+                </div>
+
+                {/* Guide Footer */}
+                <div className="px-6 py-4 bg-white border-t border-gray-200 rounded-b-2xl flex justify-center sticky bottom-0 z-20">
+                  <button onClick={() => setIsLmStudioGuideOpen(false)} className="bg-blue-600 hover:bg-blue-700 text-white px-12 py-3.5 rounded-xl font-bold shadow-lg transition-transform active:scale-95 flex items-center gap-2 text-lg">
+                    <Icon name="thumbs-up" size={24} /> 理解した！
                   </button>
                 </div>
               </div>
